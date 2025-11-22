@@ -1,0 +1,110 @@
+# Image to ICNS Converter
+
+Un script de Python para convertir imágenes a formato ICNS (íconos de macOS) de manera simple y eficiente.
+
+## Características
+
+- Convierte imágenes individuales o por lotes a formato ICNS
+- Genera todos los tamaños requeridos automáticamente (16x16 hasta 1024x1024)
+- Soporta múltiples formatos de entrada (PNG, JPG, BMP, TIFF, GIF)
+- Maneja transparencias correctamente
+- Crea versiones @2x para pantallas Retina
+
+## Requisitos
+
+- macOS (requiere el comando `iconutil`)
+- Python 3.6 o superior
+- Pillow (PIL)
+
+## Instalación
+
+1. Clona o descarga este repositorio
+2. Instala las dependencias:
+
+```bash
+pip install Pillow
+```
+
+## Uso
+
+### Convertir una imagen individual
+
+```bash
+python convert_to_icns.py imagen.png
+```
+
+Esto creará `imagen.icns` en el mismo directorio.
+
+### Especificar ruta de salida
+
+```bash
+python convert_to_icns.py imagen.png ~/Desktop/mi_icono.icns
+```
+
+### Convertir múltiples imágenes
+
+```bash
+python convert_to_icns.py ./carpeta_imagenes/
+```
+
+Esto convertirá todas las imágenes en la carpeta especificada.
+
+### Convertir múltiples imágenes a otra carpeta
+
+```bash
+python convert_to_icns.py ./carpeta_imagenes/ ./carpeta_salida/
+```
+
+## Uso como módulo
+
+También puedes importar y usar las funciones en tu propio código:
+
+```python
+from convert_to_icns import convert_to_icns, batch_convert_to_icns
+
+# Convertir una imagen
+convert_to_icns('mi_imagen.png', 'mi_icono.icns')
+
+# Convertir múltiples imágenes
+batch_convert_to_icns('./imagenes/', './iconos/')
+```
+
+## Formatos soportados
+
+- PNG
+- JPG/JPEG
+- BMP
+- TIFF/TIF
+- GIF
+
+## Tamaños generados
+
+El script genera automáticamente las siguientes resoluciones requeridas por macOS:
+
+- 16x16, 16x16@2x (32x32)
+- 32x32, 32x32@2x (64x64)
+- 128x128, 128x128@2x (256x256)
+- 256x256, 256x256@2x (512x512)
+- 512x512, 512x512@2x (1024x1024)
+
+## Notas
+
+- Las imágenes con transparencia se convierten a RGB con fondo blanco
+- Se mantiene la relación de aspecto al redimensionar
+- Se utiliza el algoritmo LANCZOS para mejor calidad de redimensionamiento
+
+## Solución de problemas
+
+**Error: "command not found: iconutil"**
+- Este script solo funciona en macOS, ya que requiere la herramienta `iconutil` del sistema.
+
+**Error: "No module named 'PIL'"**
+- Instala Pillow: `pip install Pillow`
+
+## Licencia
+
+Este proyecto está bajo la Licencia MIT. Ver el archivo [LICENSE](LICENSE) para más detalles.
+
+## Contribuciones
+
+Las contribuciones son bienvenidas. Por favor, abre un issue o pull request para sugerencias o mejoras.
