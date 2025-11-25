@@ -1,153 +1,337 @@
 import os
 import sys
+from pathlib import Path
 from PIL import Image
 import subprocess
 import tempfile
 import shutil
+from typing import Optional, List, Union
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-def convert_to_icns(input_path, output_path=None):
-    """
-    Convierte una imagen a formato ICNS (macOS icon)
+class IconConverter:
+    """Clase para convertir imágenes a formatos de ícono (ICNS de macOS y ICO de Windows)"""
     
-    Args:
-        input_path (str): Ruta de la imagen de entrada
-        output_path (str, optional): Ruta de salida para el archivo .icns
+    # Tamaños estándar requeridos para ICNS (incluye @2x implícito)
+    ICNS_SIZES = [16, 32, 64, 128, 256, 512, 1024]
     
-    Returns:
-        str: Ruta del archivo .icns creado
-    """
+    # Tamaños recomendados para ICO de Windows
+    ICO_SIZES = [16, 24, 32, 48, 64, 128, 256]
     
-    # Verificar que el archivo de entrada existe
-    if not os.path.exists(input_path):
-        raise FileNotFoundError(f"El archivo {input_path} no existe")
+    SUPPORTED_FORMATS = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif', '.gif', '.webp'}
     
-    # Si no se especifica output_path, usar el mismo nombre con extensión .icns
-    if output_path is None:
-        base_name = os.path.splitext(input_path)[0]
-        output_path = base_name + '.icns'
+    def __init__(self, preserve_alpha: bool = True, quality: int = 95):
+        """
+        Args:
+            preserve_alpha: Si True, preserva transparencia (requiere PNG)
+            quality: Calidad de compresión (1-100)
+        """
+        self.preserve_alpha = preserve_alpha
+        self.quality = quality
     
-    # Crear directorio temporal para las imágenes de diferentes tamaños
-    temp_dir = tempfile.mkdtemp()
-    
-    try:
-        # Tamaños requeridos para ICNS (en píxeles)
-        sizes = [16, 32, 64, 128, 256, 512, 1024]
+    @staticmethod
+    def _verify_iconutil():
+        """Verifica que iconutil esté disponible (solo macOS)"""
+        if sys.platform != 'darwin':
+            # No lanzamos error, solo avisamos
+            print("Advertencia: La conversión a ICNS requiere 'iconutil' y solo funciona en macOS.")
+            raise OSError("La conversión a ICNS solo funciona en macOS.")
         
-        # Abrir imagen original
-        with Image.open(input_path) as img:
-            # Convertir a RGB si es necesario (para PNG con transparencia)
-            if img.mode in ('RGBA', 'LA', 'P'):
-                # Crear fondo blanco para imágenes con transparencia
-                background = Image.new('RGB', img.size, 'white')
-                if img.mode == 'P':
-                    img = img.convert('RGBA')
-                background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
-                img = background
-            elif img.mode != 'RGB':
-                img = img.convert('RGB')
+        if shutil.which('iconutil') is None:
+            raise OSError("'iconutil' no está disponible. Asegúrate de estar en macOS.")
             
-            # Crear imágenes en diferentes tamaños
-            iconset_dir = os.path.join(temp_dir, "icon.iconset")
-            os.makedirs(iconset_dir)
+    def _prepare_image(self, img: Image.Image) -> Image.Image:
+        """Prepara la imagen para conversión (garantiza RGBA para transparencia)"""
+        
+        # Convertir imágenes con paleta o modo simple
+        if img.mode == 'P':
+            img = img.convert('RGBA' if 'transparency' in img.info else 'RGB')
+        
+        # Convertir a RGBA para manejar la transparencia
+        if self.preserve_alpha and img.mode != 'RGBA':
+            return img.convert('RGBA')
+        
+        # Si no se preserva alpha o la imagen no tiene, convertir a RGB
+        if not self.preserve_alpha and img.mode == 'RGBA':
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            background.paste(img, mask=img.split()[-1])
+            return background.convert('RGB')
+        
+        return img
+    
+    def _create_iconset(self, img: Image.Image, iconset_dir: Path) -> None:
+        """Crea el conjunto de íconos .png para iconutil (solo ICNS)"""
+        iconset_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Para ICNS, la imagen fuente debe tener al menos el tamaño máximo requerido (1024x1024)
+        max_size = 1024
+        
+        for size in self.ICNS_SIZES:
+            # Versión estándar
+            resized = img.resize((size, size), Image.Resampling.LANCZOS)
+            filename = iconset_dir / f"icon_{size}x{size}.png"
+            resized.save(filename, 'PNG', optimize=True)
             
-            for size in sizes:
-                # Redimensionar manteniendo la relación de aspecto
-                resized_img = img.resize((size, size), Image.Resampling.LANCZOS)
+            # Versión @2x (retina) - no existe para 1024px
+            if size < 512: # 16, 32, 64, 128, 256, 512
+                double_size = size * 2
+                resized_2x = img.resize((double_size, double_size), Image.Resampling.LANCZOS)
+                filename_2x = iconset_dir / f"icon_{size}x{size}@2x.png"
+                resized_2x.save(filename_2x, 'PNG', optimize=True)
+
+    def _convert_to_icns(self, prepared_img: Image.Image, output_path: Path) -> None:
+        """Usa iconutil para convertir un iconset a ICNS"""
+        self._verify_iconutil() # Verificar aquí antes de crear el iconset
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            iconset_dir = temp_path / "icon.iconset"
+            
+            # Crear iconset
+            self._create_iconset(prepared_img, iconset_dir)
+            
+            # Ejecutar iconutil
+            result = subprocess.run(
+                ['iconutil', '-c', 'icns', str(iconset_dir), '-o', str(output_path)],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            
+            if result.returncode != 0:
+                raise RuntimeError(f"Error al crear ICNS: {result.stderr}")
+
+    def _convert_to_ico(self, prepared_img: Image.Image, output_path: Path) -> None:
+        """Usa PIL para convertir a ICO (multiplataforma)"""
+        
+        # PIL soporta tamaños específicos para ICO. Le pasamos una lista de tamaños (tuples)
+        sizes_tuple = [(s, s) for s in self.ICO_SIZES if s <= min(prepared_img.size)]
+        
+        if not sizes_tuple:
+             raise ValueError("La imagen es demasiado pequeña para generar tamaños ICO estándar.")
+
+        prepared_img.save(
+            output_path, 
+            format='ICO', 
+            sizes=sizes_tuple, 
+            quality=self.quality
+        )
+
+    def convert(self, 
+                input_path: Union[str, Path], 
+                target_format: str,
+                output_path: Optional[Union[str, Path]] = None) -> Path:
+        """
+        Convierte una imagen a formato ICNS o ICO
+        
+        Args:
+            input_path: Ruta de la imagen de entrada
+            target_format: 'icns' o 'ico'
+            output_path: Ruta de salida (opcional)
+        
+        Returns:
+            Path del archivo de ícono creado
+        """
+        input_path = Path(input_path)
+        target_format = target_format.lower()
+        
+        if target_format not in ['icns', 'ico']:
+            raise ValueError("El formato objetivo debe ser 'icns' o 'ico'")
+
+        if not input_path.exists():
+            raise FileNotFoundError(f"El archivo {input_path} no existe")
+        
+        # Determinar ruta de salida
+        suffix = f".{target_format}"
+        if output_path is None:
+            output_path = input_path.with_suffix(suffix)
+        else:
+            # Asegurar sufijo correcto y crear el directorio padre
+            output_path = Path(output_path).with_suffix(suffix) 
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Abrir, validar y copiar la imagen
+        prepared_img = None
+        try:
+            with Image.open(input_path) as img:
+                min_size = 1024 if target_format == 'icns' else max(self.ICO_SIZES)
                 
-                # Guardar en diferentes formatos requeridos por ICNS
-                if size in [16, 32, 128, 256, 512]:
-                    # Para algunos tamaños, macOS espera versiones @2x
-                    resized_img.save(os.path.join(iconset_dir, f"icon_{size}x{size}.png"))
-                    if size <= 512:  # No hay @2x para 1024px
-                        resized_img_2x = img.resize((size*2, size*2), Image.Resampling.LANCZOS)
-                        resized_img_2x.save(os.path.join(iconset_dir, f"icon_{size}x{size}@2x.png"))
-        
-        # Usar el comando 'iconutil' de macOS para crear el archivo ICNS
-        cmd = ['iconutil', '-c', 'icns', iconset_dir, '-o', output_path]
-        
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        if result.returncode != 0:
-            raise RuntimeError(f"Error al crear ICNS: {result.stderr}")
-        
-        print(f"Archivo ICNS creado exitosamente: {output_path}")
-        return output_path
-        
-    except Exception as e:
-        raise Exception(f"Error en la conversión: {str(e)}")
-    
-    finally:
-        # Limpiar directorio temporal
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
+                if target_format == 'ico' and min(img.size) < 16:
+                    raise ValueError("La imagen debe tener al menos 16x16 píxeles para ICO")
+                
+                if target_format == 'icns' and min(img.size) < min_size:
+                    raise ValueError(f"La imagen debe ser de al menos {min_size}x{min_size} píxeles para ICNS")
+                
+                # Preparar imagen (manejar transparencia/modo)
+                temp_prepared_img = self._prepare_image(img)
+                
+                # IMPORTANTE: Copiar la imagen para que sea completamente independiente 
+                # y persista en memoria después de que el bloque 'with' se cierre.
+                prepared_img = temp_prepared_img.copy()
 
-def batch_convert_to_icns(input_folder, output_folder=None):
-    """
-    Convierte todas las imágenes en una carpeta a formato ICNS
-    
-    Args:
-        input_folder (str): Carpeta con imágenes de entrada
-        output_folder (str, optional): Carpeta de salida para archivos .icns
-    """
-    
-    if not os.path.exists(input_folder):
-        raise FileNotFoundError(f"La carpeta {input_folder} no existe")
-    
-    if output_folder is None:
-        output_folder = input_folder
-    elif not os.path.exists(output_folder):
-        os.makedirs(output_folder)
-    
-    # Extensiones de imagen soportadas
-    supported_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif', '.gif'}
-    
-    converted_files = []
-    
-    for filename in os.listdir(input_folder):
-        file_ext = os.path.splitext(filename)[1].lower()
+        except Exception:
+            raise
+
+        if prepared_img is None:
+            raise RuntimeError("Fallo al cargar la imagen.")
+
+        # Llamar al conversor específico FUERA del bloque 'with'
+        if target_format == 'icns':
+            self._convert_to_icns(prepared_img, output_path)
+        elif target_format == 'ico':
+            self._convert_to_ico(prepared_img, output_path)
         
-        if file_ext in supported_extensions:
-            input_path = os.path.join(input_folder, filename)
-            output_filename = os.path.splitext(filename)[0] + '.icns'
-            output_path = os.path.join(output_folder, output_filename)
-            
-            try:
-                convert_to_icns(input_path, output_path)
-                converted_files.append(output_filename)
-            except Exception as e:
-                print(f"Error convirtiendo {filename}: {str(e)}")
+        # CERRAR LA IMAGEN PREPARADA DESPUÉS DE USARLA
+        prepared_img.close()
+        
+        print(f"✓ Creado: {output_path.name}")
+        return output_path
     
-    print(f"\nConversión completada. Archivos convertidos: {len(converted_files)}")
-    return converted_files
+    def batch_convert(self, 
+                      input_folder: Union[str, Path], 
+                      target_format: str,
+                      output_folder: Optional[Union[str, Path]] = None,
+                      recursive: bool = False,
+                      max_workers: int = 4) -> List[Path]:
+        """
+        Convierte múltiples imágenes en paralelo
+        
+        Args:
+            input_folder: Carpeta con imágenes
+            target_format: 'icns' o 'ico'
+            output_folder: Carpeta de salida (opcional)
+            recursive: Buscar en subcarpetas
+            max_workers: Número de conversiones paralelas
+        
+        Returns:
+            Lista de archivos de ícono creados
+        """
+        input_folder = Path(input_folder)
+        target_format = target_format.lower()
+        
+        if target_format not in ['icns', 'ico']:
+            raise ValueError("El formato objetivo debe ser 'icns' o 'ico'")
+
+        if not input_folder.exists():
+            raise FileNotFoundError(f"La carpeta {input_folder} no existe")
+        
+        # Determinar carpeta de salida
+        if output_folder is None:
+            output_folder = input_folder
+        else:
+            output_folder = Path(output_folder)
+            output_folder.mkdir(parents=True, exist_ok=True)
+        
+        # Encontrar archivos
+        pattern = '**/*' if recursive else '*'
+        image_files = [
+            f for f in input_folder.glob(pattern)
+            if f.is_file() and f.suffix.lower() in self.SUPPORTED_FORMATS
+        ]
+        
+        if not image_files:
+            print("No se encontraron imágenes para convertir")
+            return []
+        
+        print(f"Encontradas {len(image_files)} imágenes. Convirtiendo a .{target_format}...")
+        
+        # Conversión en paralelo
+        converted = []
+        failed = []
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Crear tareas
+            future_to_file = {
+                executor.submit(
+                    self.convert,
+                    img_file,
+                    target_format,
+                    output_folder / img_file.with_suffix(f'.{target_format}').name
+                ): img_file
+                for img_file in image_files
+            }
+            
+            # Procesar resultados
+            for future in as_completed(future_to_file):
+                img_file = future_to_file[future]
+                try:
+                    result_path = future.result()
+                    converted.append(result_path)
+                except Exception as e:
+                    failed.append((img_file.name, str(e)))
+                    print(f"✗ Error en {img_file.name}: {e}")
+        
+        # Resumen
+        print(f"\n{'='*50}")
+        print(f"Conversión a .{target_format} completada:")
+        print(f"  ✓ Exitosas: {len(converted)}")
+        if failed:
+            print(f"  ✗ Fallidas: {len(failed)}")
+        print(f"{'='*50}")
+        
+        return converted
+
 
 def main():
     """Función principal para uso desde línea de comandos"""
     
-    if len(sys.argv) < 2:
-        print("Uso: python convert_to_icns.py <archivo_imagen|directorio> [archivo_salida]")
-        print("\nEjemplos:")
-        print("  python convert_to_icns.py icon.png")
-        print("  python convert_to_icns.py icon.png ~/Desktop/mi_icono.icns")
-        print("  python convert_to_icns.py ./imagenes/")
-        sys.exit(1)
+    import argparse
     
-    input_path = sys.argv[1]
-    output_path = sys.argv[2] if len(sys.argv) > 2 else None
+    parser = argparse.ArgumentParser(
+        description='Convierte imágenes a formatos de ícono (ICNS de macOS y ICO de Windows).',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Ejemplos:
+  # Convertir a ICNS (requiere macOS)
+  %(prog)s icon.png
+  %(prog)s icon.png -f icns -o ~/Desktop/mi_icono.icns
+  
+  # Convertir a ICO (multiplataforma)
+  %(prog)s icon.png -f ico
+  %(prog)s ./imagenes/ -f ico -r --workers 8
+        """
+    )
+    
+    parser.add_argument('input', help='Archivo de imagen o directorio')
+    parser.add_argument('-o', '--output', help='Archivo o directorio de salida (sin extensión)')
+    parser.add_argument('-f', '--format', default='icns', choices=['icns', 'ico'],
+                       help='Formato de ícono de salida: icns (macOS) o ico (Windows/Web). Default: icns')
+    parser.add_argument('-r', '--recursive', action='store_true',
+                       help='Buscar imágenes en subcarpetas')
+    parser.add_argument('--no-alpha', action='store_true',
+                       help='No preservar transparencia')
+    parser.add_argument('-w', '--workers', type=int, default=4,
+                       help='Número de conversiones paralelas (default: 4)')
+    parser.add_argument('-q', '--quality', type=int, default=95,
+                       help='Calidad de compresión 1-100 (solo para ICO). Default: 95')
+    
+    args = parser.parse_args()
     
     try:
-        if os.path.isfile(input_path):
-            # Convertir un solo archivo
-            convert_to_icns(input_path, output_path)
-        elif os.path.isdir(input_path):
-            # Convertir todos los archivos en el directorio
-            batch_convert_to_icns(input_path, output_path)
+        converter = IconConverter(
+            preserve_alpha=not args.no_alpha,
+            quality=args.quality
+        )
+        
+        input_path = Path(args.input)
+        
+        if input_path.is_file():
+            converter.convert(input_path, args.format, args.output)
+        elif input_path.is_dir():
+            converter.batch_convert(
+                input_path,
+                args.format,
+                args.output,
+                recursive=args.recursive,
+                max_workers=args.workers
+            )
         else:
-            print(f"Error: {input_path} no es un archivo o directorio válido")
+            print(f"Error: {args.input} no es un archivo o directorio válido")
             sys.exit(1)
             
     except Exception as e:
-        print(f"cd Error: {str(e)}")
+        print(f"Error: {e}")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

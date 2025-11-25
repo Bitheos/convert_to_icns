@@ -1,110 +1,173 @@
-# Image to ICNS Converter
+# 🎨 ICNS Converter
 
-Un script de Python para convertir imágenes a formato ICNS (íconos de macOS) de manera simple y eficiente.
+Herramienta Python para convertir imágenes a formato ICNS (iconos de macOS) con soporte para transparencia, procesamiento por lotes y conversión paralela.
 
-## Características
+## ✨ Características
 
-- Convierte imágenes individuales o por lotes a formato ICNS
-- Genera todos los tamaños requeridos automáticamente (16x16 hasta 1024x1024)
-- Soporta múltiples formatos de entrada (PNG, JPG, BMP, TIFF, GIF)
-- Maneja transparencias correctamente
-- Crea versiones @2x para pantallas Retina
+- 🖼️ **Conversión de alta calidad** con algoritmo LANCZOS
+- 🌈 **Preservación de transparencia** (canal alpha)
+- ⚡ **Procesamiento paralelo** para conversiones por lotes
+- 📁 **Búsqueda recursiva** en subcarpetas
+- 🎯 **Múltiples formatos** soportados: PNG, JPG, JPEG, BMP, TIFF, GIF, WebP
+- 🔧 **Interfaz CLI completa** con argumentos personalizables
+- ✅ **Validación automática** de requisitos y tamaños
 
-## Requisitos
+## 📋 Requisitos
 
-- macOS (requiere el comando `iconutil`)
-- Python 3.6 o superior
-- Pillow (PIL)
+- **macOS** (requiere la utilidad `iconutil` del sistema)
+- **Python 3.7+**
+- **Pillow** (PIL)
 
-## Instalación
-
-1. Clona o descarga este repositorio
-2. Instala las dependencias:
+### Instalación de dependencias
 
 ```bash
 pip install Pillow
 ```
 
-## Uso
+## 🚀 Uso
 
-### Convertir una imagen individual
-
-```bash
-python convert_to_icns.py imagen.png
-```
-
-Esto creará `imagen.icns` en el mismo directorio.
-
-### Especificar ruta de salida
+### Conversión simple
 
 ```bash
-python convert_to_icns.py imagen.png ~/Desktop/mi_icono.icns
+# Convertir una imagen (genera pokeball.icns en la misma carpeta)
+python3 convert_to_icns.py pokeball.png
+
+# Especificar archivo de salida
+python3 convert_to_icns.py pokeball.png -o ~/Desktop/mi_icono.icns
 ```
 
-### Convertir múltiples imágenes
+### Conversión por lotes
 
 ```bash
-python convert_to_icns.py ./carpeta_imagenes/
+# Convertir todas las imágenes de una carpeta
+python3 convert_to_icns.py ./imagenes/ -o ./iconos/
+
+# Búsqueda recursiva en subcarpetas con 8 workers
+python3 convert_to_icns.py ./imagenes/ -o ./iconos/ -r --workers 8
 ```
 
-Esto convertirá todas las imágenes en la carpeta especificada.
-
-### Convertir múltiples imágenes a otra carpeta
+### Opciones avanzadas
 
 ```bash
-python convert_to_icns.py ./carpeta_imagenes/ ./carpeta_salida/
+# Sin transparencia (fondo blanco)
+python3 convert_to_icns.py logo.png --no-alpha
+
+# Ajustar calidad de compresión
+python3 convert_to_icns.py imagen.png -q 100
+
+# Ver todas las opciones
+python3 convert_to_icns.py --help
 ```
 
-## Uso como módulo
+## 📖 Argumentos
 
-También puedes importar y usar las funciones en tu propio código:
+| Argumento | Descripción |
+|-----------|-------------|
+| `input` | Archivo de imagen o directorio (requerido) |
+| `-o, --output` | Archivo o directorio de salida |
+| `-r, --recursive` | Buscar imágenes en subcarpetas |
+| `--no-alpha` | No preservar transparencia (usar fondo blanco) |
+| `-w, --workers` | Número de conversiones paralelas (default: 4) |
+| `-q, --quality` | Calidad de compresión 1-100 (default: 95) |
+| `-h, --help` | Mostrar ayuda |
+
+## 💡 Ejemplos
+
+### Crear ícono de aplicación
+
+```bash
+# Desde un PNG con transparencia
+python3 convert_to_icns.py app_logo.png -o MiApp.icns
+```
+
+### Convertir carpeta completa
+
+```bash
+# Convertir todas las imágenes de 'assets' a 'icons'
+python3 convert_to_icns.py ./assets/ -o ./icons/ -r --workers 8
+```
+
+### Uso como módulo Python
 
 ```python
-from convert_to_icns import convert_to_icns, batch_convert_to_icns
+from convert_to_icns import ICNSConverter
+
+# Crear conversor
+converter = ICNSConverter(preserve_alpha=True, quality=95)
 
 # Convertir una imagen
-convert_to_icns('mi_imagen.png', 'mi_icono.icns')
+converter.convert('logo.png', 'output.icns')
 
-# Convertir múltiples imágenes
-batch_convert_to_icns('./imagenes/', './iconos/')
+# Conversión por lotes
+converter.batch_convert(
+    input_folder='./imagenes/',
+    output_folder='./iconos/',
+    recursive=True,
+    max_workers=4
+)
 ```
 
-## Formatos soportados
+## 🎯 Formatos soportados
 
-- PNG
-- JPG/JPEG
+- PNG (recomendado para transparencia)
+- JPEG / JPG
 - BMP
-- TIFF/TIF
+- TIFF / TIF
 - GIF
+- WebP
 
-## Tamaños generados
+## 📐 Tamaños generados
 
-El script genera automáticamente las siguientes resoluciones requeridas por macOS:
+El script genera automáticamente todos los tamaños estándar de ICNS:
 
-- 16x16, 16x16@2x (32x32)
-- 32x32, 32x32@2x (64x64)
-- 128x128, 128x128@2x (256x256)
-- 256x256, 256x256@2x (512x512)
-- 512x512, 512x512@2x (1024x1024)
+- 16x16, 32x32, 64x64, 128x128, 256x256, 512x512, 1024x1024
+- Versiones @2x (Retina) para 16, 32, 128, 256, 512
 
-## Notas
+## ⚠️ Notas importantes
 
-- Las imágenes con transparencia se convierten a RGB con fondo blanco
-- Se mantiene la relación de aspecto al redimensionar
-- Se utiliza el algoritmo LANCZOS para mejor calidad de redimensionamiento
+- La imagen de entrada debe tener **al menos 16x16 píxeles**
+- Para mejores resultados, usa imágenes cuadradas de **1024x1024 o más**
+- Las imágenes con transparencia deben estar en formato PNG
+- El script solo funciona en **macOS** (requiere `iconutil`)
 
-## Solución de problemas
+## 🐛 Solución de problemas
 
-**Error: "command not found: iconutil"**
-- Este script solo funciona en macOS, ya que requiere la herramienta `iconutil` del sistema.
+### "iconutil no está disponible"
+- Este script solo funciona en macOS
+- Verifica que `iconutil` esté en tu PATH
 
-**Error: "No module named 'PIL'"**
-- Instala Pillow: `pip install Pillow`
+### "La imagen debe tener al menos 16x16 píxeles"
+- Tu imagen es demasiado pequeña
+- Usa una imagen de mayor resolución
 
-## Licencia
+### Error de permisos en carpeta de salida
+- Usa rutas relativas (`./iconos/`) en lugar de absolutas (`/iconos/`)
+- Asegúrate de tener permisos de escritura en el directorio
 
-Este proyecto está bajo la Licencia MIT. Ver el archivo [LICENSE](LICENSE) para más detalles.
+## 📄 Licencia
 
-## Contribuciones
+MIT License - Ver archivo [LICENSE](LICENSE) para más detalles.
 
-Las contribuciones son bienvenidas. Por favor, abre un issue o pull request para sugerencias o mejoras.
+## 🤝 Contribuciones
+
+Las contribuciones son bienvenidas. Por favor:
+
+1. Fork el proyecto
+2. Crea una rama para tu feature (`git checkout -b feature/AmazingFeature`)
+3. Commit tus cambios (`git commit -m 'Add some AmazingFeature'`)
+4. Push a la rama (`git push origin feature/AmazingFeature`)
+5. Abre un Pull Request
+
+## 👤 Autor
+
+Desarrollado con ❤️ para la comunidad macOS
+
+## 🙏 Agradecimientos
+
+- Basado en las especificaciones de formato ICNS de Apple
+- Usa la biblioteca Pillow para procesamiento de imágenes
+- Utiliza la herramienta nativa `iconutil` de macOS
+
+---
+
+**¿Encontraste útil esta herramienta? ⭐ Dale una estrella al repositorio!**
