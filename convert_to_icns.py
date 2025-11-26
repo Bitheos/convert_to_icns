@@ -5,7 +5,8 @@ from PIL import Image
 import subprocess
 import tempfile
 import shutil
-from typing import Optional, List, Union
+import logging
+from typing import Optional, List, Union, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class IconConverter:
@@ -19,28 +20,52 @@ class IconConverter:
     
     SUPPORTED_FORMATS = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif', '.gif', '.webp'}
     
-    def __init__(self, preserve_alpha: bool = True, quality: int = 95):
+    def __init__(self, preserve_alpha: bool = True, quality: int = 95, 
+                 auto_upscale: bool = False, verbose: bool = True):
         """
         Args:
             preserve_alpha: Si True, preserva transparencia (requiere PNG)
             quality: Calidad de compresión (1-100)
+            auto_upscale: Si True, escala automáticamente imágenes pequeñas
+            verbose: Si True, muestra mensajes de progreso
         """
         self.preserve_alpha = preserve_alpha
         self.quality = quality
+        self.auto_upscale = auto_upscale
+        self.logger = logging.getLogger(__name__)
+        
+        if verbose:
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(message)s'
+            )
     
     @staticmethod
     def _verify_iconutil():
         """Verifica que iconutil esté disponible (solo macOS)"""
         if sys.platform != 'darwin':
-            # No lanzamos error, solo avisamos
-            print("Advertencia: La conversión a ICNS requiere 'iconutil' y solo funciona en macOS.")
             raise OSError("La conversión a ICNS solo funciona en macOS.")
         
         if shutil.which('iconutil') is None:
             raise OSError("'iconutil' no está disponible. Asegúrate de estar en macOS.")
+    
+    def _upscale_if_needed(self, img: Image.Image, min_size: int) -> Image.Image:
+        """Escala la imagen si es menor al tamaño mínimo"""
+        if min(img.size) < min_size:
+            if not self.auto_upscale:
+                return img
             
+            self.logger.warning(f"Escalando imagen desde {img.size} a {min_size}x{min_size}")
+            scale = min_size / min(img.size)
+            new_size = tuple(int(dim * scale) for dim in img.size)
+            return img.resize(new_size, Image.Resampling.LANCZOS)
+        return img
+    
     def _prepare_image(self, img: Image.Image) -> Image.Image:
         """Prepara la imagen para conversión (garantiza RGBA para transparencia)"""
+        
+        # Guardar metadatos
+        metadata = img.info.copy() if hasattr(img, 'info') else {}
         
         # Convertir imágenes con paleta o modo simple
         if img.mode == 'P':
@@ -48,39 +73,50 @@ class IconConverter:
         
         # Convertir a RGBA para manejar la transparencia
         if self.preserve_alpha and img.mode != 'RGBA':
-            return img.convert('RGBA')
-        
+            prepared = img.convert('RGBA')
         # Si no se preserva alpha o la imagen no tiene, convertir a RGB
-        if not self.preserve_alpha and img.mode == 'RGBA':
+        elif not self.preserve_alpha and img.mode == 'RGBA':
             background = Image.new('RGB', img.size, (255, 255, 255))
             background.paste(img, mask=img.split()[-1])
-            return background.convert('RGB')
+            prepared = background.convert('RGB')
+        else:
+            prepared = img
         
-        return img
+        # Restaurar metadatos importantes
+        if metadata:
+            prepared.info = metadata
+        
+        return prepared
     
     def _create_iconset(self, img: Image.Image, iconset_dir: Path) -> None:
         """Crea el conjunto de íconos .png para iconutil (solo ICNS)"""
         iconset_dir.mkdir(parents=True, exist_ok=True)
         
-        # Para ICNS, la imagen fuente debe tener al menos el tamaño máximo requerido (1024x1024)
-        max_size = 1024
+        # Cachear tamaños ya procesados para reutilizar
+        size_cache = {}
         
         for size in self.ICNS_SIZES:
             # Versión estándar
-            resized = img.resize((size, size), Image.Resampling.LANCZOS)
+            if size not in size_cache:
+                size_cache[size] = img.resize((size, size), Image.Resampling.LANCZOS)
+            
+            resized = size_cache[size]
             filename = iconset_dir / f"icon_{size}x{size}.png"
             resized.save(filename, 'PNG', optimize=True)
             
             # Versión @2x (retina) - no existe para 1024px
-            if size < 512: # 16, 32, 64, 128, 256, 512
+            if size < 512:
                 double_size = size * 2
-                resized_2x = img.resize((double_size, double_size), Image.Resampling.LANCZOS)
+                if double_size not in size_cache:
+                    size_cache[double_size] = img.resize((double_size, double_size), Image.Resampling.LANCZOS)
+                
+                resized_2x = size_cache[double_size]
                 filename_2x = iconset_dir / f"icon_{size}x{size}@2x.png"
                 resized_2x.save(filename_2x, 'PNG', optimize=True)
 
     def _convert_to_icns(self, prepared_img: Image.Image, output_path: Path) -> None:
         """Usa iconutil para convertir un iconset a ICNS"""
-        self._verify_iconutil() # Verificar aquí antes de crear el iconset
+        self._verify_iconutil()
 
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -103,11 +139,11 @@ class IconConverter:
     def _convert_to_ico(self, prepared_img: Image.Image, output_path: Path) -> None:
         """Usa PIL para convertir a ICO (multiplataforma)"""
         
-        # PIL soporta tamaños específicos para ICO. Le pasamos una lista de tamaños (tuples)
+        # PIL soporta tamaños específicos para ICO
         sizes_tuple = [(s, s) for s in self.ICO_SIZES if s <= min(prepared_img.size)]
         
         if not sizes_tuple:
-             raise ValueError("La imagen es demasiado pequeña para generar tamaños ICO estándar.")
+            raise ValueError("La imagen es demasiado pequeña para generar tamaños ICO estándar.")
 
         prepared_img.save(
             output_path, 
@@ -140,12 +176,18 @@ class IconConverter:
         if not input_path.exists():
             raise FileNotFoundError(f"El archivo {input_path} no existe")
         
+        # Validar formato de entrada
+        if input_path.suffix.lower() not in self.SUPPORTED_FORMATS:
+            raise ValueError(
+                f"Formato no soportado: {input_path.suffix}. "
+                f"Formatos válidos: {', '.join(self.SUPPORTED_FORMATS)}"
+            )
+        
         # Determinar ruta de salida
         suffix = f".{target_format}"
         if output_path is None:
             output_path = input_path.with_suffix(suffix)
         else:
-            # Asegurar sufijo correcto y crear el directorio padre
             output_path = Path(output_path).with_suffix(suffix) 
             output_path.parent.mkdir(parents=True, exist_ok=True)
         
@@ -155,17 +197,22 @@ class IconConverter:
             with Image.open(input_path) as img:
                 min_size = 1024 if target_format == 'icns' else max(self.ICO_SIZES)
                 
-                if target_format == 'ico' and min(img.size) < 16:
-                    raise ValueError("La imagen debe tener al menos 16x16 píxeles para ICO")
-                
-                if target_format == 'icns' and min(img.size) < min_size:
-                    raise ValueError(f"La imagen debe ser de al menos {min_size}x{min_size} píxeles para ICNS")
+                # Validar o escalar tamaño
+                if min(img.size) < min_size:
+                    if self.auto_upscale:
+                        img = self._upscale_if_needed(img, min_size)
+                    else:
+                        min_required = 16 if target_format == 'ico' else min_size
+                        if min(img.size) < min_required:
+                            raise ValueError(
+                                f"La imagen debe tener al menos {min_required}x{min_required} píxeles "
+                                f"para {target_format.upper()}. Use --auto-upscale para escalar automáticamente."
+                            )
                 
                 # Preparar imagen (manejar transparencia/modo)
                 temp_prepared_img = self._prepare_image(img)
                 
-                # IMPORTANTE: Copiar la imagen para que sea completamente independiente 
-                # y persista en memoria después de que el bloque 'with' se cierre.
+                # Copiar la imagen para que sea independiente
                 prepared_img = temp_prepared_img.copy()
 
         except Exception:
@@ -174,24 +221,37 @@ class IconConverter:
         if prepared_img is None:
             raise RuntimeError("Fallo al cargar la imagen.")
 
-        # Llamar al conversor específico FUERA del bloque 'with'
+        # Llamar al conversor específico
         if target_format == 'icns':
             self._convert_to_icns(prepared_img, output_path)
         elif target_format == 'ico':
             self._convert_to_ico(prepared_img, output_path)
         
-        # CERRAR LA IMAGEN PREPARADA DESPUÉS DE USARLA
+        # Cerrar la imagen preparada
         prepared_img.close()
         
-        print(f"✓ Creado: {output_path.name}")
+        self.logger.info(f"✓ Creado: {output_path.name}")
         return output_path
+    
+    def _check_disk_space(self, image_files: List[Path], output_folder: Path) -> None:
+        """Verifica que hay suficiente espacio en disco"""
+        total_size = sum(f.stat().st_size for f in image_files)
+        estimated_output = total_size * 1.5  # Estimación conservadora
+        
+        free_space = shutil.disk_usage(output_folder).free
+        if free_space < estimated_output:
+            raise OSError(
+                f"Espacio insuficiente: {free_space / 1e9:.1f}GB disponibles, "
+                f"~{estimated_output / 1e9:.1f}GB necesarios estimados"
+            )
     
     def batch_convert(self, 
                       input_folder: Union[str, Path], 
                       target_format: str,
                       output_folder: Optional[Union[str, Path]] = None,
                       recursive: bool = False,
-                      max_workers: int = 4) -> List[Path]:
+                      max_workers: int = 4,
+                      dry_run: bool = False) -> List[Path]:
         """
         Convierte múltiples imágenes en paralelo
         
@@ -201,6 +261,7 @@ class IconConverter:
             output_folder: Carpeta de salida (opcional)
             recursive: Buscar en subcarpetas
             max_workers: Número de conversiones paralelas
+            dry_run: Si True, solo muestra qué archivos se procesarían
         
         Returns:
             Lista de archivos de ícono creados
@@ -229,10 +290,24 @@ class IconConverter:
         ]
         
         if not image_files:
-            print("No se encontraron imágenes para convertir")
+            self.logger.info("No se encontraron imágenes para convertir")
             return []
         
-        print(f"Encontradas {len(image_files)} imágenes. Convirtiendo a .{target_format}...")
+        # Modo dry-run
+        if dry_run:
+            self.logger.info(f"\n[Dry run] Se procesarían {len(image_files)} archivos:")
+            for img in image_files:
+                output_name = img.with_suffix(f'.{target_format}').name
+                self.logger.info(f"  • {img.name} → {output_name}")
+            return []
+        
+        # Verificar espacio en disco
+        try:
+            self._check_disk_space(image_files, output_folder)
+        except OSError as e:
+            self.logger.warning(str(e))
+        
+        self.logger.info(f"Encontradas {len(image_files)} imágenes. Convirtiendo a .{target_format}...")
         
         # Conversión en paralelo
         converted = []
@@ -258,15 +333,18 @@ class IconConverter:
                     converted.append(result_path)
                 except Exception as e:
                     failed.append((img_file.name, str(e)))
-                    print(f"✗ Error en {img_file.name}: {e}")
+                    self.logger.error(f"✗ Error en {img_file.name}: {e}")
         
         # Resumen
-        print(f"\n{'='*50}")
-        print(f"Conversión a .{target_format} completada:")
-        print(f"  ✓ Exitosas: {len(converted)}")
+        self.logger.info(f"\n{'='*50}")
+        self.logger.info(f"Conversión a .{target_format} completada:")
+        self.logger.info(f"  ✓ Exitosas: {len(converted)}")
         if failed:
-            print(f"  ✗ Fallidas: {len(failed)}")
-        print(f"{'='*50}")
+            self.logger.info(f"  ✗ Fallidas: {len(failed)}")
+            self.logger.info(f"\nErrores detallados:")
+            for filename, error in failed:
+                self.logger.info(f"  • {filename}: {error}")
+        self.logger.info(f"{'='*50}")
         
         return converted
 
@@ -288,6 +366,12 @@ Ejemplos:
   # Convertir a ICO (multiplataforma)
   %(prog)s icon.png -f ico
   %(prog)s ./imagenes/ -f ico -r --workers 8
+  
+  # Previsualizar sin convertir
+  %(prog)s ./imagenes/ -f ico --dry-run
+  
+  # Escalar automáticamente imágenes pequeñas
+  %(prog)s small_icon.png -f icns --auto-upscale
         """
     )
     
@@ -299,17 +383,25 @@ Ejemplos:
                        help='Buscar imágenes en subcarpetas')
     parser.add_argument('--no-alpha', action='store_true',
                        help='No preservar transparencia')
+    parser.add_argument('--auto-upscale', action='store_true',
+                       help='Escalar automáticamente imágenes menores al tamaño mínimo')
     parser.add_argument('-w', '--workers', type=int, default=4,
                        help='Número de conversiones paralelas (default: 4)')
     parser.add_argument('-q', '--quality', type=int, default=95,
                        help='Calidad de compresión 1-100 (solo para ICO). Default: 95')
+    parser.add_argument('--dry-run', action='store_true',
+                       help='Previsualizar archivos a procesar sin convertirlos')
+    parser.add_argument('--quiet', action='store_true',
+                       help='No mostrar mensajes de progreso')
     
     args = parser.parse_args()
     
     try:
         converter = IconConverter(
             preserve_alpha=not args.no_alpha,
-            quality=args.quality
+            quality=args.quality,
+            auto_upscale=args.auto_upscale,
+            verbose=not args.quiet
         )
         
         input_path = Path(args.input)
@@ -322,7 +414,8 @@ Ejemplos:
                 args.format,
                 args.output,
                 recursive=args.recursive,
-                max_workers=args.workers
+                max_workers=args.workers,
+                dry_run=args.dry_run
             )
         else:
             print(f"Error: {args.input} no es un archivo o directorio válido")
